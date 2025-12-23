@@ -42,18 +42,18 @@ https://www.hilton.com/en/locations/pet-friendly/
 ---
 
 ## 📂 Project Structure
----
+
 hilton-scraper/
 ├── main.py                    # Main scraper script
 ├── hilton_pet_friendly_hotels.csv     # Output CSV file
 ├── hilton_pet_friendly_hotels.json    # Output JSON file
 ├── hilton_last_state.json    # State file for resuming
 └── requirements.txt          # Python dependencies
----
+
 
 ## Configuration
 
----
+
 FIELDS = [
     "hotel_code",
     "hotel_name",
@@ -71,9 +71,9 @@ FIELDS = [
     "is_pet_friendly",
     "last_updated"
 ]
----
 
----
+
+
 Field	Description	Example
 hotel_code	Unique identifier	"HILTON-1-3"
 hotel_name	Hotel name	"Hilton San Francisco Union Square"
@@ -90,4 +90,4 @@ nearby_json	Nearby attractions (JSON)	[{"place": "Golden Gate Park", "distance":
 airport_json	Airport information (JSON)	[{"airport": "SFO", "distance": "14 mi", "shuttle": "Available"}]
 is_pet_friendly	Pet-friendly status	"true" or "false"
 last_updated	Timestamp of extraction	"2024-01-15T10:30:00.000Z"
----
+
