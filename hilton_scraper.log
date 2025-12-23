@@ -1,0 +1,7 @@
+2025-12-23 12:22:43,697 - INFO - Starting Hilton pet-friendly hotels scraper...
+2025-12-23 12:22:45,327 - INFO - Navigating to https://www.hilton.com/en/locations/pet-friendly/
+2025-12-23 12:23:15,967 - ERROR - Scraping failed: Timeout 30000ms exceeded.
+=========================== logs ===========================
+"domcontentloaded" event fired
+"load" event fired
+============================================================
