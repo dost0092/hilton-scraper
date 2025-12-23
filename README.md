@@ -1,1 +1,1 @@
-![Alt text for the image](images/diagram.png)
+![Pipeline Diagram](diagram.png)
