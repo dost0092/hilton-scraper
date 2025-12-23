@@ -1,5 +1,5 @@
 ![Pipeline Diagram](diagram.png)
-![Pipeline Diagram](consol_log.png)
+![Pipeline Diagram](consol_logs.png)
 
 # 🐾 Hilton Pet-Friendly Hotels Scraper
 
