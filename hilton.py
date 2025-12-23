@@ -1,4 +1,5 @@
 
+
 import time
 import re
 import csv
@@ -198,8 +199,7 @@ def main():
     driver = uc.Chrome(options=make_options(), use_subprocess=True)
     wait = WebDriverWait(driver, 60)
     hotels = []
-    processed = set()
-    page = 1
+    page = start_page
 
     # Prepare files
     if not os.path.exists(OUTPUT_FILE_CSV):
@@ -235,7 +235,14 @@ def main():
                 try:
                     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
                     time.sleep(0.5)
-                    driver.execute_script("arguments[0].click();", btn)
+                    try:
+                        btn.click()
+                    except Exception:
+                        try:
+                            driver.execute_script("arguments[0].click();", btn)
+                        except Exception:
+                            time.sleep(0.8)
+                            driver.execute_script("arguments[0].click();", btn)
 
                     popup = retry_action(lambda: wait_for_popup_content(driver))
                     all_text = "\n".join(
@@ -301,17 +308,33 @@ def main():
                     popup.send_keys(Keys.ESCAPE)
                     time.sleep(1)
 
-                except Exception as e:
-                    print("⚠️ Error extracting hotel:", e)
+                except Exception:
                     try:
                         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
                     except:
                         pass
                     continue
 
+            # Save state after each page
+            save_state(page)
+
+            # Restart browser every 5 pages
+            if page % 2 == 0:
+                print(f"🔄 Restarting browser after {page} pages...")
+                driver.quit()
+                driver = uc.Chrome(options=make_options(), use_subprocess=True)
+                wait = WebDriverWait(driver, 60)
+                driver.get(START_URL)
+                for p in range(1, page):
+                    try:
+                        btn_next = driver.find_element(By.ID, "pagination-right")
+                        driver.execute_script("arguments[0].click();", btn_next)
+                        time.sleep(3)
+                    except:
+                        break
+
             # Pagination
             try:
-                save_state(page)
                 btn_next = driver.find_element(By.ID, "pagination-right")
                 if "disabled" in btn_next.get_attribute("class"):
                     print("✅ No more pages.")
