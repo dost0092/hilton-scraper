@@ -1,341 +1,334 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
-from contextlib import contextmanager
+
+import time
+import re
 import csv
 import json
-import re
+import os
 from datetime import datetime
-import time
+
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    NoSuchElementException
+)
+
+# ================== CONFIG ==================
 
 START_URL = "https://www.hilton.com/en/locations/pet-friendly/"
-OUTPUT_FILE = "hilton_pet_friendly_hotels_selenium.csv"
-HEADLESS = False  # Set to True for headless execution
+OUTPUT_FILE_CSV = "hilton_pet_friendly_hotels.csv"
+OUTPUT_FILE_JSON = "hilton_pet_friendly_hotels.json"
+STATE_FILE = "hilton_last_state.json"
 
 FIELDS = [
-    "hotel_code", "hotel_brand", "city", "states", "country",
-    "address", "contacts", "parking", "links",
-    "is_pet_friendly", "pet_policy", "pet_fee", "weight_limit",
-    "service_animals_allowed", "last_updated"
+    "hotel_code",
+    "hotel_name",
+    "address",
+    "phone",
+    "rating",
+    "description",
+    "card_price",
+    "overview_table_json",
+    "pets_json",
+    "parking_json",
+    "amenities_json",
+    "nearby_json",
+    "airport_json",
+    "is_pet_friendly",
+    "last_updated"
 ]
 
-def clean(text):
-    return text.strip() if text else ""
+MAX_SCROLLS = 20
+RETRY_LIMIT = 3
+
+
+# ================== UTILS ==================
+
+def make_options():
+    opts = uc.ChromeOptions()
+    opts.add_argument("--start-maximized")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    return opts
+
 
 def extract_money(text):
     if not text:
         return ""
-    m = re.search(r"([$R€£]\s?\d+[.,]?\d*)", text)
+    m = re.search(r"([$€£R$]\s?\d+[.,]?\d*)", text)
     return m.group(1) if m else ""
+
 
 def extract_weight(text):
     if not text:
         return ""
-    m = re.search(r"(\d+\s?kg|\d+\s?lb)", text.lower())
+    m = re.search(r"(\d+\s?(lb|kg))", text.lower())
     return m.group(1) if m else ""
 
-@contextmanager
-def wait_for_page_load(driver, timeout=30):
-    """
-    Context manager for waiting for page loads after clicks[citation:8]
-    This prevents the 'execution context destroyed' error
-    """
-    old_page = driver.find_element(By.TAG_NAME, 'html')
-    yield
-    WebDriverWait(driver, timeout).until(
-        EC.staleness_of(old_page)
-    )
 
-# Setup WebDriver with options
-options = webdriver.ChromeOptions()
-if HEADLESS:
-    options.add_argument('--headless')
-options.add_argument('--window-size=1920,1080')
-# Disable implicit waits to use explicit waits only[citation:1][citation:3]
-options.set_capability('pageLoadStrategy', 'normal')
+def save_state(page_num):
+    with open(STATE_FILE, "w") as f:
+        json.dump({"last_page": page_num}, f)
 
-driver = webdriver.Chrome(options=options)
-wait = WebDriverWait(driver, 20)  # Primary explicit wait object
 
-try:
-    print("Navigating to page...")
-    driver.get(START_URL)
-    
-    # Wait for page to be fully ready[citation:3]
-    wait.until(lambda d: d.execute_script('return document.readyState') == 'complete')
-    
-    print("Waiting for hotel cards to load...")
-    # Wait for hotel cards with multiple possible selectors
-    hotel_cards = wait.until(
-        EC.presence_of_all_elements_located((
-            By.CSS_SELECTOR, 
-            "ul li button[data-testid^='hotelDetails-'], button[data-testid^='hotelDetails-']"
-        ))
-    )
-    
-    total = len(hotel_cards)
-    print(f"Found {total} hotel cards")
-    
-    hotels = []
-    
-    for i in range(total):
-        print(f"\n--- Processing hotel {i+1} of {total} ---")
-        
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+            return data.get("last_page", 1)
+    return 1
+
+
+def wait_for_popup_content(driver, timeout=40):
+    start = time.time()
+    while True:
         try:
-            # Re-locate cards each iteration to avoid stale references[citation:10]
-            current_cards = driver.find_elements(
-                By.CSS_SELECTOR, 
-                "ul li button[data-testid^='hotelDetails-'], button[data-testid^='hotelDetails-']"
+            popup = driver.find_element(
+                By.CSS_SELECTOR,
+                "div.relative.flex.size-full.flex-col.overflow-y-auto"
             )
-            
-            if i >= len(current_cards):
-                print(f"  Card index {i} no longer available, skipping...")
+            text_nodes = [e for e in popup.find_elements(By.XPATH, ".//*") if e.text.strip()]
+            if len(text_nodes) > 8:
+                return popup
+        except:
+            pass
+        if time.time() - start > timeout:
+            raise TimeoutException("Popup content did not load")
+        time.sleep(0.4)
+
+
+def safe_find_text(el, xpath):
+    try:
+        return el.find_element(By.XPATH, xpath).text.strip()
+    except:
+        return ""
+
+
+def parse_overview_table(popup):
+    data = {}
+    try:
+        rows = popup.find_elements(By.XPATH, ".//table//tr")
+        for row in rows:
+            try:
+                key = row.find_element(By.XPATH, ".//th").text.strip()
+                val = row.find_element(By.XPATH, ".//td").text.strip()
+                data[key] = val
+            except:
                 continue
-                
-            btn = current_cards[i]
-            
-            # Extract hotel code from data-testid
-            testid = btn.get_attribute("data-testid") or ""
-            hotel_code_hint = testid.split("hotelDetails-")[-1] if "hotelDetails-" in testid else f"hotel_{i+1}"
-            print(f"  Hotel code hint: {hotel_code_hint}")
-            
-            # Scroll into view using JavaScript[citation:6]
-            driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", btn)
-            time.sleep(0.5)  # Brief pause after scroll
-            
-            # Store reference to current page for staleness detection
-            old_body = driver.find_element(By.TAG_NAME, 'body')
-            
-            # Click and wait for navigation/dialog[citation:8]
-            btn.click()
-            
-            # Wait for dialog to appear
-            print("  Waiting for dialog...")
+    except:
+        pass
+    return data
+
+
+def parse_amenities(popup):
+    amenities = []
+    try:
+        li_elements = popup.find_elements(
+            By.XPATH, ".//ul[contains(@class,'peer flex')]/li"
+        )
+        for li in li_elements:
+            label = safe_find_text(li, ".//span[@data-testid='hotelAmenityLabel']")
+            if label:
+                amenities.append(label)
+    except:
+        pass
+    return amenities
+
+
+def parse_nearby(popup):
+    data = []
+    try:
+        items = popup.find_elements(By.XPATH, "//*[@id='tab-panel-nearBy']//li")
+        for item in items:
             try:
-                # Wait for dialog with multiple possible selectors
-                dialog = wait.until(
-                    EC.presence_of_element_located((
-                        By.CSS_SELECTOR,
-                        "div[role='dialog'], div[aria-modal='true'], .modal-dialog, .modal-content"
-                    ))
-                )
-                print("  Dialog detected")
-            except TimeoutException:
-                print("  Dialog not found, attempting to continue...")
-                # Check if we're on a new page instead
-                try:
-                    wait.until(EC.staleness_of(old_body))
-                    print("  Page navigation occurred instead of dialog")
-                    # Go back and continue
-                    driver.back()
-                    wait.until(EC.presence_of_all_elements_located((
-                        By.CSS_SELECTOR, 
-                        "button[data-testid^='hotelDetails-']"
-                    )))
-                    continue
-                except:
-                    print("  No navigation detected, skipping hotel...")
-                    continue
-            
-            # Extract data from dialog
-            hotel_data = {}
-            
-            # 1. Get hotel name
-            hotel_name = ""
-            name_selectors = [
-                "div[role='dialog'] h1",
-                "div[role='dialog'] h2", 
-                "[data-testid*='hotel-name']",
-                "[data-testid*='hotelName']",
-                ".hotel-name",
-                ".property-name"
-            ]
-            
-            for selector in name_selectors:
-                try:
-                    name_elem = dialog.find_element(By.CSS_SELECTOR, selector)
-                    hotel_name = name_elem.text.strip()
-                    if hotel_name and len(hotel_name) > 5:
-                        print(f"  Found hotel name: {hotel_name[:50]}...")
-                        break
-                except NoSuchElementException:
-                    continue
-            
-            # 2. Get address
-            address = ""
-            address_selectors = [
-                "div[role='dialog'] address",
-                "[data-testid*='address']",
-                ".hotel-address",
-                ".property-address"
-            ]
-            
-            for selector in address_selectors:
-                try:
-                    addr_elem = dialog.find_element(By.CSS_SELECTOR, selector)
-                    address = addr_elem.text.strip()
-                    if address and len(address) > 10:
-                        break
-                except NoSuchElementException:
-                    continue
-            
-            # 3. Get phone number
-            phone = ""
-            try:
-                dialog_text = dialog.text
-                phone_match = re.search(r'(\+?1?\s*\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})', dialog_text)
-                if phone_match:
-                    phone = phone_match.group(1)
+                place = safe_find_text(item, ".//div[1]/span")
+                distance = safe_find_text(item, ".//div[2]")
+                if place:
+                    data.append({"place": place, "distance": distance})
             except:
-                pass
-            
-            # 4. Look for pet policy
-            pet_policy = ""
+                continue
+    except:
+        pass
+    return data
+
+
+def parse_airport_info(popup):
+    data = []
+    try:
+        # Click "Airport info" button
+        btn = popup.find_element(By.XPATH, "//*[@id='airport']")
+        btn.click()
+        time.sleep(1)
+        items = popup.find_elements(By.XPATH, "//*[@id='tab-panel-airport']//li")
+        for item in items:
             try:
-                # Get all text and look for pet-related sections
-                full_text = dialog.text
-                lines = full_text.split('\n')
-                pet_lines = []
-                
-                pet_keywords = ['pet', 'dog', 'cat', 'animal', 'pet-friendly', 
-                               'weight limit', 'pet fee', 'pets allowed', 'pet policy']
-                
-                for line in lines:
-                    line_lower = line.lower()
-                    if any(keyword in line_lower for keyword in pet_keywords):
-                        if len(line.strip()) > 10:  # Avoid very short lines
-                            pet_lines.append(line.strip())
-                
-                if pet_lines:
-                    pet_policy = " | ".join(pet_lines[:5])
+                name = safe_find_text(item, ".//div[1]/div/span[last()]")
+                distance = safe_find_text(item, ".//div[1]/div[2]")
+                shuttle = safe_find_text(item, ".//p")
+                if name:
+                    data.append({"airport": name, "distance": distance, "shuttle": shuttle})
             except:
-                pass
-            
-            # 5. Determine if pet-friendly
-            is_pet_friendly = "false"
-            if pet_policy:
-                policy_lower = pet_policy.lower()
-                if ('pet' in policy_lower or 'dog' in policy_lower or 'cat' in policy_lower):
-                    # Check for negative indicators
-                    negative_indicators = ['no pet', 'pets not allowed', 'does not allow', 'not accept']
-                    if not any(neg in policy_lower for neg in negative_indicators):
-                        is_pet_friendly = "true"
-            elif 'pet-friendly' in dialog.text.lower():
-                is_pet_friendly = "true"
-            
-            # 6. Try to find links
-            links = ""
-            try:
-                link_elements = dialog.find_elements(By.CSS_SELECTOR, "a[href*='hilton.com']")
-                hotel_links = []
-                for link_elem in link_elements[:3]:  # Limit to first 3 links
-                    href = link_elem.get_attribute("href")
-                    if href and 'hilton.com' in href:
-                        hotel_links.append(href)
-                if hotel_links:
-                    links = ", ".join(hotel_links)
-            except:
-                pass
-            
-            # Create the record
-            record = {
-                "hotel_code": f"HILTON-{i+1}_{hotel_code_hint}",
-                "hotel_brand": clean(hotel_name),
-                "city": "",  # Could extract from address with additional parsing
-                "states": "",  # Could extract from address with additional parsing
-                "country": "",  # Could extract from address with additional parsing
-                "address": clean(address),
-                "contacts": clean(phone),
-                "parking": "",  # Could look for parking info in dialog
-                "links": links,
-                "is_pet_friendly": is_pet_friendly,
-                "pet_policy": clean(pet_policy),
-                "pet_fee": extract_money(pet_policy),
-                "weight_limit": extract_weight(pet_policy),
-                "service_animals_allowed": "true" if 'service animal' in pet_policy.lower() else "false",
-                "last_updated": datetime.utcnow().isoformat()
-            }
-            
-            hotels.append(record)
-            print(f"  ✓ Added: {record['hotel_brand'][:40] if record['hotel_brand'] else 'Unnamed hotel'}...")
-            
-            # Close the dialog
-            print("  Closing dialog...")
-            close_success = False
-            
-            # Method 1: Try Escape key
-            try:
-                from selenium.webdriver.common.keys import Keys
-                dialog.send_keys(Keys.ESCAPE)
-                time.sleep(1)
-                close_success = True
-            except:
-                pass
-            
-            # Method 2: Try clicking close button
-            if not close_success:
-                close_selectors = [
-                    "button[aria-label*='Close']",
-                    "button:contains('Close')",
-                    "[data-testid*='close']",
-                    ".close-button",
-                    ".modal-close",
-                    "button.close"
-                ]
-                for selector in close_selectors:
-                    try:
-                        close_btn = dialog.find_element(By.CSS_SELECTOR, selector)
-                        close_btn.click()
-                        time.sleep(1)
-                        close_success = True
-                        break
-                    except:
-                        continue
-            
-            # Method 3: Click outside dialog
-            if not close_success:
-                try:
-                    # Click at position (100, 100) - outside dialog
-                    webdriver.ActionChains(driver).move_by_offset(100, 100).click().perform()
-                    time.sleep(1)
-                    close_success = True
-                except:
-                    pass
-            
-            # Wait for dialog to disappear
-            try:
-                wait.until(EC.invisibility_of_element(dialog))
-            except:
-                pass
-                
-            # Brief pause before next iteration
-            time.sleep(1)
-            
+                continue
+    except:
+        pass
+    return data
+
+
+def retry_action(action, retries=RETRY_LIMIT, delay=2):
+    for i in range(retries):
+        try:
+            return action()
         except Exception as e:
-            print(f"  Error processing hotel {i+1}: {str(e)[:100]}")
-            # Try to recover by refreshing the list
+            print(f"⚠ Retry {i+1}/{retries}: {e}")
+            time.sleep(delay)
+    raise Exception("Max retries exceeded")
+
+
+# ================== MAIN SCRAPER ==================
+
+def main():
+    start_page = load_state()
+    print(f"🔄 Resuming from page {start_page}")
+
+    driver = uc.Chrome(options=make_options(), use_subprocess=True)
+    wait = WebDriverWait(driver, 60)
+    hotels = []
+    processed = set()
+    page = 1
+
+    # Prepare files
+    if not os.path.exists(OUTPUT_FILE_CSV):
+        with open(OUTPUT_FILE_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer.writeheader()
+
+    if not os.path.exists(OUTPUT_FILE_JSON):
+        with open(OUTPUT_FILE_JSON, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+    try:
+        driver.get(START_URL)
+        wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+        time.sleep(3)
+
+        # Jump to last saved page
+        for p in range(1, start_page):
             try:
-                driver.refresh()
-                wait.until(EC.presence_of_all_elements_located((
-                    By.CSS_SELECTOR, 
-                    "button[data-testid^='hotelDetails-']"
-                )))
+                btn_next = driver.find_element(By.ID, "pagination-right")
+                driver.execute_script("arguments[0].click();", btn_next)
+                time.sleep(3)
             except:
-                pass
-            continue
-    
-    print(f"\nSuccessfully processed {len(hotels)} hotels")
-    
-finally:
-    driver.quit()
+                break
 
-# Write CSV
-print(f"\nWriting {len(hotels)} records to {OUTPUT_FILE}")
-with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-    writer = csv.DictWriter(f, fieldnames=FIELDS)
-    writer.writeheader()
-    writer.writerows(hotels)
+        while True:
+            print(f"📄 Scraping page {page}...")
 
-print(f"\n✅ DONE — Successfully scraped {len(hotels)} Hilton pet-friendly hotels using Selenium")
+            # Find hotel cards
+            buttons = driver.find_elements(By.XPATH, "//button[.//span[normalize-space()='View hotel details']]")
+
+            for i, btn in enumerate(buttons):
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    time.sleep(0.5)
+                    driver.execute_script("arguments[0].click();", btn)
+
+                    popup = retry_action(lambda: wait_for_popup_content(driver))
+                    all_text = "\n".join(
+                        e.text.strip()
+                        for e in popup.find_elements(By.XPATH, ".//*")
+                        if e.text.strip()
+                    )
+
+                    # Extracting Details
+                    name = safe_find_text(popup, ".//h1 | .//h2") or "UNKNOWN"
+                    rating = safe_find_text(popup, ".//p[contains(text(),'Rating')]")
+                    description = safe_find_text(popup, ".//div/p[@class='inline text-start md:block']")
+                    address = safe_find_text(driver, ".//span[@data-testid='locationMarker']")
+                    price = safe_find_text(driver, ".//span[@data-testid='rateItem']")
+
+                    overview = parse_overview_table(popup)
+                    amenities = parse_amenities(popup)
+                    nearby = parse_nearby(popup)
+                    airport = parse_airport_info(popup)
+
+                    pets_json = {}
+                    parking_json = {}
+                    for k, v in overview.items():
+                        if "pet" in k.lower():
+                            pets_json[k] = v
+                        if "park" in k.lower():
+                            parking_json[k] = v
+
+                    hotel_data = {
+                        "hotel_code": f"HILTON-{page}-{i+1}",
+                        "hotel_name": name,
+                        "address": address,
+                        "phone": re.search(r'(\+?\d[\d\s().-]{7,}\d)', all_text).group(1)
+                                   if re.search(r'(\+?\d[\d\s().-]{7,}\d)', all_text) else "",
+                        "rating": rating,
+                        "description": description,
+                        "card_price": price,
+                        "overview_table_json": json.dumps(overview, ensure_ascii=False),
+                        "pets_json": json.dumps(pets_json, ensure_ascii=False),
+                        "parking_json": json.dumps(parking_json, ensure_ascii=False),
+                        "amenities_json": json.dumps(amenities, ensure_ascii=False),
+                        "nearby_json": json.dumps(nearby, ensure_ascii=False),
+                        "airport_json": json.dumps(airport, ensure_ascii=False),
+                        "is_pet_friendly": "true" if "pet" in all_text.lower() else "false",
+                        "last_updated": datetime.utcnow().isoformat()
+                    }
+
+                    hotels.append(hotel_data)
+                    print(f"✅ Extracted: {hotel_data['hotel_name']}")
+
+                    # Save incrementally
+                    with open(OUTPUT_FILE_CSV, "a", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=FIELDS)
+                        writer.writerow(hotel_data)
+
+                    # JSON incremental save
+                    with open(OUTPUT_FILE_JSON, "r+", encoding="utf-8") as jf:
+                        data = json.load(jf)
+                        data.append(hotel_data)
+                        jf.seek(0)
+                        json.dump(data, jf, ensure_ascii=False, indent=2)
+
+                    popup.send_keys(Keys.ESCAPE)
+                    time.sleep(1)
+
+                except Exception as e:
+                    print("⚠️ Error extracting hotel:", e)
+                    try:
+                        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                    except:
+                        pass
+                    continue
+
+            # Pagination
+            try:
+                save_state(page)
+                btn_next = driver.find_element(By.ID, "pagination-right")
+                if "disabled" in btn_next.get_attribute("class"):
+                    print("✅ No more pages.")
+                    break
+                print("➡️ Moving to next page...")
+                driver.execute_script("arguments[0].click();", btn_next)
+                page += 1
+                time.sleep(4)
+            except NoSuchElementException:
+                print("✅ All pages scraped.")
+                break
+
+    finally:
+        driver.quit()
+        print(f"\n🎉 DONE — Scraped {len(hotels)} hotels total.")
+        save_state(page)
+
+
+if __name__ == "__main__":
+    main()
